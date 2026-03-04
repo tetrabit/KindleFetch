@@ -3,17 +3,17 @@
 first_time_setup() {
     clear
     echo -e "
-  _____      _               
- / ____|    | |              
-| (___   ___| |_ _   _ _ __  
- \___ \ / _ \ __| | | | '_ \ 
+  _____      _
+ / ____|    | |
+| (___   ___| |_ _   _ _ __
+ \___ \ / _ \ __| | | | '_ \
  ____) |  __/ |_| |_| | |_) |
-|_____/ \___|\__|\__,_| .__/ 
-                      | |    
-                      |_|    
+|_____/ \___|\__|\__,_| .__/
+                      | |
+                      |_|
 "
     echo "Welcome to KindleFetch! Let's set up your configuration."
-    
+
     echo -n "Enter your Kindle downloads directory [It will be $BASE_DIR/your_directory. Only enter your_directory part.]: "
     read -r downloads_dir
     if [ -n "$downloads_dir" ]; then
@@ -33,6 +33,9 @@ first_time_setup() {
     if [ "$zlib_login_choice" = "n" ] || [ "$zlib_login_choice" = "N" ]; then
         ZLIB_AUTH=false
     else
+        [ -z "$ZLIB_URL" ] && ZLIB_URL=$(find_working_url $ZLIB_MIRROR_URLS)
+        save_config
+
         while true; do
             echo -n "Zlib email: "
             read -r zlib_email
