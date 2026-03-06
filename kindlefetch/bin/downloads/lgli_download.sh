@@ -8,15 +8,15 @@ lgli_download() {
         return 1
     fi
     
-    local book_info="$(awk -v i="$index" 'BEGIN{RS="\\{"; FS="\\}"} NR==i+1{print $1}' "$TMP_DIR"/search_results.json)"
-    if [ -z "$book_info" ]; then
-        echo "Invalid book selection"
+    local book_info="$(select_preferred_format_book_info "$index" "lgli")"
+    if [ $? -ne 0 ] || [ -z "$book_info" ]; then
+        echo "No EPUB/PDF version available from LibGen for this title."
         return 1
     fi
     
     local md5="$(get_json_value "$book_info" "md5")"
     local title="$(get_json_value "$book_info" "title")"
-    local format="$(get_json_value "$book_info" "format")"
+    local format="$(get_json_value "$book_info" "format" | tr '[:upper:]' '[:lower:]')"
     
     printf "\nDownloading: $title"
 

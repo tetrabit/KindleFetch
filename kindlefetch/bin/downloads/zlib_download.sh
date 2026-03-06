@@ -8,18 +8,41 @@ zlib_download() {
         return 1
     fi
     
-    local book_info="$(awk -v i="$index" 'BEGIN{RS="\\{"; FS="\\}"} NR==i+1{print $1}' "$TMP_DIR"/search_results.json)"
-    if [ -z "$book_info" ]; then
-        echo "Invalid book selection" >&2
+    local book_info="$(select_preferred_format_book_info "$index" "zlib")"
+    if [ $? -ne 0 ] || [ -z "$book_info" ]; then
+        echo "No EPUB/PDF version available from Z-Library for this title." >&2
         return 1
     fi
     
     local md5="$(get_json_value "$book_info" "md5")"
+    local book_page=""
 
     local final_url="$(curl -s -L -o /dev/null -w "%{url_effective}" "$ZLIB_URL/md5/$md5")"
 
-    local book_id="$(echo "$final_url" | sed -n 's#.*/book/\([0-9][0-9]*\)/[a-z0-9]\+#\1#p')"
-    local book_hash="$(echo "$final_url" | sed -n 's#.*/book/[0-9][0-9]*/\([a-z0-9]\+\).*#\1#p')"
+    # Legacy: /book/<id>/<hash>
+    local book_id="$(echo "$final_url" | sed -n 's#.*/book/\([0-9][0-9]*\)/[[:alnum:]]\+\(/.*\)\?$#\1#p')"
+    local book_hash="$(echo "$final_url" | sed -n 's#.*/book/[0-9][0-9]*/\([[:alnum:]]\+\)\(/.*\)\?$#\1#p')"
+
+    # Current format: /book/<hash>
+    if [ -z "$book_hash" ]; then
+        book_hash="$(echo "$final_url" | sed -n 's#.*/book/\([[:alnum:]]\+\)\(/.*\)\?$#\1#p')"
+    fi
+
+    if [ -n "$book_hash" ]; then
+        book_page="$(curl -s -L -b "$ZLIB_COOKIES_FILE" "$ZLIB_URL/book/$book_hash")"
+        if echo "$book_page" | grep -qi "isn't available for download due to the complaint of the copyright holder"; then
+            echo "This title is currently unavailable on Z-Library (copyright complaint)." >&2
+            return 1
+        fi
+    fi
+
+    # If URL does not contain numeric id, fetch page and extract it.
+    if [ -z "$book_id" ] && [ -n "$book_hash" ]; then
+        book_id="$(echo "$book_page" | sed -n 's/.*data-book_id="\([0-9][0-9]*\)".*/\1/p' | head -n1)"
+        if [ -z "$book_id" ]; then
+            book_id="$(echo "$book_page" | sed -n 's/.*CurrentBook = new Book({\"id\":\([0-9][0-9]*\).*/\1/p' | head -n1)"
+        fi
+    fi
 
     if [ -z "$book_id" ] || [ -z "$book_hash" ]; then
         echo "Failed to extract book info from URL: $final_url" >&2
@@ -34,6 +57,31 @@ zlib_download() {
     local ddl="$(get_json_value "$response" "downloadLink" | sed 's#\\\/#/#g' | tr -d '\r\n')"
     local title="$(get_json_value "$response" "description" | tr -d '\r\n')"
     local ext="$(get_json_value "$response" "extension" | tr -d '\r\n')"
+
+    if [ -z "$title" ] || [ "$title" = "null" ]; then
+        title="$(get_json_value "$book_info" "title" | tr -d '\r\n')"
+    fi
+
+    if [ -z "$ext" ] || [ "$ext" = "null" ]; then
+        ext="$(get_json_value "$book_info" "format" | tr '[:upper:]' '[:lower:]' | tr -d '\r\n')"
+    fi
+
+    if [ -z "$ddl" ]; then
+        if [ -z "$book_page" ] || ! echo "$book_page" | grep -q "addDownloadedBook"; then
+            book_page="$(curl -s -L -b "$ZLIB_COOKIES_FILE" "$ZLIB_URL/book/$book_hash")"
+        fi
+        local dl_path="$(echo "$book_page" | sed -n 's#.*class="btn btn-default addDownloadedBook" href="\([^"]*\)".*#\1#p' | head -n1)"
+        if [ -n "$dl_path" ]; then
+            case "$dl_path" in
+                http://*|https://*)
+                    ddl="$dl_path"
+                    ;;
+                *)
+                    ddl="$ZLIB_URL$dl_path"
+                    ;;
+            esac
+        fi
+    fi
 
     if [ -z "$ddl" ]; then
         echo "Failed to get download link from Z-Library response." >&2
@@ -56,6 +104,7 @@ zlib_download() {
     fi
 
     local file_size="$(curl -sI "$ddl" | awk '/Content-Length/ {printf "%.2f MB\n", $2/1048576}')"
+    [ -z "$ext" ] && ext="bin"
     local filename="$(sanitize_filename "${title}.${ext}")"
     local filename="${filename:-book.bin}"
     
