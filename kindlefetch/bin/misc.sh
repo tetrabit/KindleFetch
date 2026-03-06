@@ -38,6 +38,10 @@ sanitize_filename() {
     echo "$1" | sed -e 's/[^[:alnum:]\._-]/_/g' -e 's/ /_/g'
 }
 
+normalize_title() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^[:alnum:]]//g'
+}
+
 get_json_value() {
     echo "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed "s/\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"/\1/" || \
     echo "$1" | grep -o "\"$2\"[[:space:]]*:[[:space:]]*[^,}]*" | sed "s/\"$2\"[[:space:]]*:[[:space:]]*\([^,}]*\)/\1/"
@@ -131,14 +135,120 @@ zlib_login() {
 
 find_working_url() {
     for url in "$@"; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' \
-               --max-time 2 -L "$url")
+        attempt=1
+        while [ "$attempt" -le 5 ]; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+                   --max-time 10 -L "$url")
+            curl_status=$?
 
-        [ "$code" = "000" ] && continue
-        [ "$code" -ge 500 ] && continue
+            if [ "$curl_status" -eq 0 ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then
+                echo "$url"
+                return 0
+            fi
 
-        echo "$url"
-        return 0
+            attempt=$((attempt + 1))
+            [ "$attempt" -le 5 ] && sleep 1
+        done
     done
+    return 1
+}
+
+zlib_md5_is_downloadable() {
+    local md5="$1"
+    local cache_file="${TMP_DIR}/zlib_availability.cache"
+    local cached_status=""
+    local final_url=""
+    local book_hash=""
+    local book_page=""
+
+    [ -z "$md5" ] && return 0
+
+    if [ -f "$cache_file" ]; then
+        cached_status="$(awk -F'|' -v m="$md5" '$1 == m {print $2; exit}' "$cache_file")"
+        case "$cached_status" in
+            ok) return 0 ;;
+            blocked) return 1 ;;
+        esac
+    fi
+
+    final_url="$(curl -s -L -o /dev/null -w "%{url_effective}" "$ZLIB_URL/md5/$md5")"
+    book_hash="$(echo "$final_url" | sed -n 's#.*/book/\([[:alnum:]]\+\)\(/.*\)\?$#\1#p')"
+
+    if [ -z "$book_hash" ]; then
+        echo "$md5|ok" >> "$cache_file"
+        return 0
+    fi
+
+    if [ -f "$ZLIB_COOKIES_FILE" ]; then
+        book_page="$(curl -s -L -b "$ZLIB_COOKIES_FILE" "$ZLIB_URL/book/$book_hash")"
+    else
+        book_page="$(curl -s -L "$ZLIB_URL/book/$book_hash")"
+    fi
+
+    if echo "$book_page" | grep -qi "isn't available for download due to the complaint of the copyright holder"; then
+        echo "$md5|blocked" >> "$cache_file"
+        return 1
+    fi
+
+    echo "$md5|ok" >> "$cache_file"
+    return 0
+}
+
+select_preferred_format_book_info() {
+    local index="$1"
+    local provider="$2"
+
+    if [ ! -f "$TMP_DIR/search_results.json" ]; then
+        return 1
+    fi
+
+    local selected_book_info="$(awk -v i="$index" 'BEGIN{RS="\\{"; FS="\\}"} NR==i+1{print $1}' "$TMP_DIR"/search_results.json)"
+    if [ -z "$selected_book_info" ]; then
+        return 1
+    fi
+
+    local selected_title="$(get_json_value "$selected_book_info" "title")"
+    local selected_key="$(normalize_title "$selected_title")"
+
+    local total_books="$(grep -o '"title":' "$TMP_DIR"/search_results.json | wc -l)"
+    local preferred_pdf=""
+    local i=1
+
+    while [ "$i" -le "$total_books" ]; do
+        local candidate="$(awk -v i="$i" 'BEGIN{RS="\\{"; FS="\\}"} NR==i+1{print $1}' "$TMP_DIR"/search_results.json)"
+        if [ -n "$candidate" ]; then
+            local candidate_description="$(get_json_value "$candidate" "description" | tr '[:upper:]' '[:lower:]')"
+            if echo "$candidate_description" | grep -q "$provider"; then
+                local candidate_title="$(get_json_value "$candidate" "title")"
+                local candidate_key="$(normalize_title "$candidate_title")"
+                if [ "$candidate_key" = "$selected_key" ]; then
+                    local candidate_md5="$(get_json_value "$candidate" "md5")"
+                    if [ "$provider" = "zlib" ]; then
+                        if ! zlib_md5_is_downloadable "$candidate_md5"; then
+                            i=$((i + 1))
+                            continue
+                        fi
+                    fi
+                    local candidate_format="$(get_json_value "$candidate" "format" | tr '[:upper:]' '[:lower:]')"
+                    case "$candidate_format" in
+                        epub)
+                            echo "$candidate"
+                            return 0
+                            ;;
+                        pdf)
+                            [ -z "$preferred_pdf" ] && preferred_pdf="$candidate"
+                            ;;
+                    esac
+                fi
+            fi
+        fi
+        i=$((i + 1))
+    done
+
+    if [ -n "$preferred_pdf" ]; then
+        echo "$preferred_pdf"
+        return 0
+    fi
+
     return 1
 }
