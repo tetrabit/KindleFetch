@@ -173,7 +173,8 @@ search_books() {
             gsub(/"/, "\\\"", author)
             gsub(/"/, "\\\"", description)
         
-            if (title != "") {
+            format_lc = tolower(format)
+            if (title != "" && (format_lc == "epub" || format_lc == "pdf")) {
                 if (count > 0) {
                     printf ",\n"
                 }
@@ -274,12 +275,18 @@ search_books() {
 
                         local lgli_available=false
                         local zlib_available=false
+                        local zlib_unavailable_note=false
 
                         if echo "$book_info" | grep -q "lgli"; then
                             lgli_available=true
                         fi
                         if echo "$book_info" | grep -q "zlib"; then
-                            zlib_available=true
+                            if select_preferred_format_book_info "$choice" "zlib" >/dev/null; then
+                                zlib_available=true
+                            else
+                                zlib_available=false
+                                zlib_unavailable_note=true
+                            fi
                         fi
 
                         while true; do
@@ -296,6 +303,8 @@ search_books() {
                                 else
                                     echo "2. zlib (Authentication required)"
                                 fi
+                            elif [ "$zlib_unavailable_note" = true ]; then
+                                echo "   zlib unavailable for this title (blocked or no EPUB/PDF copy)"
                             fi
                             echo "3. Cancel download"
 
